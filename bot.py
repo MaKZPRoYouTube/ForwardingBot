@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-import re # Нужен для поиска цифр ID в тексте
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import MessageOriginUser
@@ -15,7 +15,6 @@ try:
 except ValueError:
     OWNER_ID = 0
 
-# Настройки облака (JSONBin)
 BIN_ID = os.getenv('BIN_ID')
 BIN_API_KEY = os.getenv('BIN_API_KEY')
 if BIN_ID:
@@ -31,7 +30,6 @@ dp = Dispatcher()
 async def get_admins():
     admins = {OWNER_ID}
     if not BIN_URL or not BIN_API_KEY: return admins
-    
     headers = {"X-Master-Key": BIN_API_KEY.strip()}
     try:
         async with ClientSession() as session:
@@ -52,84 +50,9 @@ async def save_admins_cloud(admin_list, message=None):
     except Exception as e:
         if message: await message.answer(f"Ошибка сохранения: {e}")
 
-# --- ОБРАБОТКА СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ ---
-
-@dp.message(F.chat.type == "private")
-async def user_message_handler(message: types.Message):
-    admins = await get_admins()
-    
-    # 1. Если пишет админ (Владелец или из списка)
-    if message.from_user.id in admins:
-        # Проверяем, является ли это ответом (Reply)
-        if message.reply_to_message:
-            await handle_admin_reply(message)
-        else:
-            # Если админ просто пишет (не reply), обрабатываем как команды или игнорим
-             pass 
-        return
-
-    # 2. Если пишет обычный пользователь -> Пересылаем админам
-    await forward_to_admins(message, admins)
-
-async def forward_to_admins(message: types.Message, admins):
-    user_id = message.from_user.id
-    first_name = message.from_user.first_name
-    
-    # Формируем техническое сообщение (невидимку), чтобы админ мог ответить
-    info_text = (f"📩 Сообщение от {first_name}\n"
-                 f"🆔 ID: `{user_id}`\n"
-                 f"↘️ Ответьте (Reply) на ЭТО сообщение, чтобы отправить ответ пользователю.")
-
-    for aid in admins:
-        try:
-            # Сначала пересылаем само сообщение (фото, видео, текст)
-            forwarded_msg = await message.forward(chat_id=aid)
-            
-            # Следом отправляем "Карточку пользователя", привязывая её ответом к пересланному сообщению
-            await bot.send_message(
-                chat_id=aid, 
-                text=info_text, 
-                reply_to_message_id=forwarded_msg.message_id,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Не удалось переслать админу {aid}: {e}")
-
-# --- ОБРАБОТКА ОТВЕТА АДМИНА ---
-
-async def handle_admin_reply(message: types.Message):
-    reply_msg = message.reply_to_message
-    target_user_id = None
-
-    # ВАРИАНТ 1: Админ ответил на нашу "Техническую карточку" (где написано ID: 123...)
-    if reply_msg.text and "🆔 ID:" in reply_msg.text:
-        try:
-            # Ищем цифры ID в тексте сообщения с помощью регулярного выражения
-            match = re.search(r"ID:\s*`?(\d+)`?", reply_msg.text)
-            if match:
-                target_user_id = int(match.group(1))
-        except:
-            pass
-
-    # ВАРИАНТ 2: Админ ответил прямо на пересланное сообщение (Старый способ, работает если профиль открыт)
-    if not target_user_id and reply_msg.forward_origin:
-        origin = reply_msg.forward_origin
-        if isinstance(origin, MessageOriginUser):
-            target_user_id = origin.sender_user.id
-
-    # ОТПРАВКА
-    if target_user_id:
-        try:
-            # Отправляем копию сообщения (copy_message поддерживает фото, видео, голосовые)
-            await message.copy_to(chat_id=target_user_id)
-            await message.react([types.ReactionTypeEmoji(emoji="👍")]) # Подтверждение лайком
-        except Exception as e:
-            await message.answer(f"❌ Не удалось отправить (пользователь заблокировал бота?): {e}")
-    else:
-        await message.answer("⚠️ Не могу определить получателя.\n"
-                             "Пожалуйста, отвечайте (Reply) на сообщение с текстом '🆔 ID: ...', которое приходит следом за фото/текстом.")
-
-# --- КОМАНДЫ ---
+# ==========================================
+# 1. БЛОК КОМАНД (ОНИ ДОЛЖНЫ БЫТЬ ПЕРВЫМИ!)
+# ==========================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -141,7 +64,7 @@ async def cmd_start(message: types.Message):
                              f"2. Информацию с ID.\n\n"
                              f"👉 Чтобы ответить, делайте **Reply на сообщение с ID**.")
     else:
-        await message.answer("Здравствуйте! Пришлите вашу историю или видео, и мы опубликуем это.")
+        await message.answer("Здравствуйте! Если у вас есть интересная история или видео, отправляйте сюда.")
 
 @dp.message(Command("add"))
 async def add_admin(message: types.Message, command: CommandObject):
@@ -176,6 +99,78 @@ async def list_admins(message: types.Message):
 @dp.message(Command("check"))
 async def debug_check(message: types.Message):
     await message.answer(f"Ваш ID: {message.from_user.id}\nOwner ID: {OWNER_ID}\nBin: {'OK' if BIN_URL else 'NO'}")
+
+
+# ==========================================
+# 2. БЛОК ЛОГИКИ (ПЕРЕСЫЛКА И ОТВЕТЫ)
+# ==========================================
+
+# Обработчик ответов админа (Reply)
+@dp.message(F.reply_to_message)
+async def handle_admin_reply(message: types.Message):
+    admins = await get_admins()
+    
+    # Если это не админ - значит это обычный юзер делает reply, отправляем админам как обычное сообщение
+    if message.from_user.id not in admins:
+        await forward_to_admins(message, admins)
+        return
+
+    # ЛОГИКА АДМИНА
+    reply_msg = message.reply_to_message
+    target_user_id = None
+
+    # Способ А: Ответ на техническое сообщение с ID
+    if reply_msg.text and "🆔 ID:" in reply_msg.text:
+        try:
+            match = re.search(r"ID:\s*`?(\d+)`?", reply_msg.text)
+            if match:
+                target_user_id = int(match.group(1))
+        except: pass
+
+    # Способ Б: Ответ на пересланное (если профиль открыт)
+    if not target_user_id and reply_msg.forward_origin:
+        origin = reply_msg.forward_origin
+        if isinstance(origin, MessageOriginUser):
+            target_user_id = origin.sender_user.id
+
+    if target_user_id:
+        try:
+            await message.copy_to(chat_id=target_user_id)
+            await message.react([types.ReactionTypeEmoji(emoji="👍")])
+        except Exception as e:
+            await message.answer(f"❌ Не дошло: {e}")
+    else:
+        await message.answer("⚠️ Чтобы ответить пользователю со скрытым профилем, сделайте Reply на сообщение с текстом '🆔 ID: ...'")
+
+
+# Обработчик всех остальных сообщений (от пользователей)
+@dp.message()
+async def user_message_handler(message: types.Message):
+    admins = await get_admins()
+    
+    # Админы не должны спамить сами себе, если просто пишут текст без команды
+    if message.from_user.id in admins:
+        return
+
+    # Пересылка
+    await forward_to_admins(message, admins)
+
+async def forward_to_admins(message: types.Message, admins):
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name
+    
+    # Текст для карточки
+    info_text = (f"📩 Сообщение от {first_name}\n"
+                 f"🆔 ID: `{user_id}`\n"
+                 f"↘️ Ответьте на ЭТО сообщение.")
+
+    for aid in admins:
+        try:
+            # 1. Пересылаем контент
+            forwarded = await message.forward(chat_id=aid)
+            # 2. Шлем карточку с ID ответом на контент
+            await bot.send_message(chat_id=aid, text=info_text, reply_to_message_id=forwarded.message_id)
+        except: pass
 
 # --- SERVER ---
 async def handle(request): return web.Response(text="Bot is running")

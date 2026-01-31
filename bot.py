@@ -7,205 +7,188 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import MessageOriginUser
 from aiohttp import web, ClientSession
 
-# --- КОНФИГУРАЦИЯ ---
+# --- НАСТРОЙКИ ---
 API_TOKEN = os.getenv('BOT_TOKEN')
-# Владелец всегда загружается из переменных среды (самый главный)
-try:
-    OWNER_ID = int(os.getenv('ADMIN_ID', 0))
-except:
-    OWNER_ID = 0
 
-# Настройки облачного файла (JSONBin)
+# ПРАВИЛЬНАЯ ЗАГРУЗКА ID ВЛАДЕЛЬЦА
+# Мы убираем пробелы (.strip), чтобы "123 " не вызвало ошибку
+raw_admin_id = os.getenv('ADMIN_ID', '0')
+try:
+    OWNER_ID = int(str(raw_admin_id).strip())
+except ValueError:
+    OWNER_ID = 0
+    print("ОШИБКА: ADMIN_ID в Render задан не числом!")
+
+# НАСТРОЙКИ ОБЛАКА (JSONBIN)
 BIN_ID = os.getenv('BIN_ID')
 BIN_API_KEY = os.getenv('BIN_API_KEY')
-BIN_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID}"
+# Генерируем ссылку, убирая лишние пробелы, если они есть
+if BIN_ID:
+    BIN_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID.strip()}"
+else:
+    BIN_URL = ""
 
 logging.basicConfig(level=logging.INFO)
-
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- РАБОТА С ОБЛАЧНЫМ ФАЙЛОМ ---
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
 
-async def get_admins():
-    """Скачивает список админов из облака"""
-    admins = {OWNER_ID} # Владелец всегда в списке
-    
+async def get_admins(debug_msg=None):
+    """Возвращает множество ID админов (Владелец + те, кто в облаке)"""
+    admins = {OWNER_ID}  # Владелец всегда админ
+
     if not BIN_ID or not BIN_API_KEY:
-        logging.warning("JSONBin не настроен, список админов не сохраняется!")
-        return admins
-
-    headers = {"X-Master-Key": BIN_API_KEY}
+        return admins # Если облако не настроено, возвращаем только владельца
+    
+    headers = {"X-Master-Key": BIN_API_KEY.strip()}
     
     try:
         async with ClientSession() as session:
-            # Важно: добавляем /latest, чтобы читать последнюю версию
             async with session.get(f"{BIN_URL}/latest", headers=headers) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # JSONBin возвращает данные внутри ключа "record"
                     saved_list = data.get("record", [])
-                    admins.update(saved_list)
+                    if isinstance(saved_list, list):
+                        admins.update(saved_list)
                 else:
-                    logging.error(f"Ошибка чтения JSONBin: {resp.status}")
+                    if debug_msg:
+                        error_text = await resp.text()
+                        await debug_msg.answer(f"⚠️ Ошибка облака: {resp.status}\n{error_text}")
     except Exception as e:
-        logging.error(f"Ошибка сети при чтении админов: {e}")
+        if debug_msg: await debug_msg.answer(f"⚠️ Ошибка соединения: {e}")
         
     return admins
 
-async def save_admins_cloud(admin_list):
-    """Отправляет новый список админов в облако"""
-    if not BIN_ID or not BIN_API_KEY:
-        return
-        
-    headers = {
-        "Content-Type": "application/json",
-        "X-Master-Key": BIN_API_KEY
-    }
-    # Превращаем множество в список для JSON
-    data = list(admin_list)
-    
+async def save_admins_cloud(admin_list, message=None):
+    if not BIN_URL: return
+    headers = {"Content-Type": "application/json", "X-Master-Key": BIN_API_KEY.strip()}
     try:
         async with ClientSession() as session:
-            async with session.put(BIN_URL, json=data, headers=headers) as resp:
-                if resp.status == 200:
-                    logging.info("Список админов сохранен в облако.")
-                else:
-                    logging.error(f"Ошибка записи в JSONBin: {resp.status}")
+            # Важно: В облако пишем список, в коде работаем с множеством
+            await session.put(BIN_URL, json=list(admin_list), headers=headers)
     except Exception as e:
-        logging.error(f"Ошибка сети при записи админов: {e}")
+        if message: await message.answer(f"Не удалось сохранить: {e}")
 
+# --- КОМАНДА ДИАГНОСТИКИ (ГЛАВНАЯ ДЛЯ ВАС СЕЙЧАС) ---
 
-# --- ХЭНДЛЕРЫ КОМАНД ---
+@dp.message(Command("check"))
+async def debug_handler(message: types.Message):
+    user_id = message.from_user.id
+    
+    status_text = (
+        f"🕵️‍♂️ **Диагностика:**\n\n"
+        f"Ваш Telegram ID: `{user_id}`\n"
+        f"ID Владельца (в Render): `{OWNER_ID}`\n"
+    )
+    
+    if user_id == OWNER_ID:
+        status_text += "✅ **ВЫ ВЛАДЕЛЕЦ** (ID совпадают).\n"
+    else:
+        status_text += "❌ **Вы НЕ владелец** (ID не совпадают).\n"
+        status_text += "👉 Проверьте переменную `ADMIN_ID` в Render.\n"
+
+    # Проверка облака
+    if BIN_ID and BIN_API_KEY:
+        status_text += f"\n☁️ Облако настроено (ID: {BIN_ID[:4]}...)"
+    else:
+        status_text += "\n⚠️ Облако НЕ настроено (список других админов не будет сохраняться)."
+        
+    await message.answer(status_text, parse_mode="Markdown")
+
+# --- СТАНДАРТНЫЕ КОМАНДЫ ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    admins = await get_admins() # Теперь это асинхронная функция, нужен await
-
-    if user_id in admins:
-        role = "Владелец" if user_id == OWNER_ID else "Админ"
-        await message.answer(f"👑 Привет, {role}!\n"
-                             "Команды:\n"
-                             "/add ID — добавить\n"
-                             "/del ID — удалить\n"
-                             "/list — список\n"
-                             "Отвечай (Reply) на сообщения для отправки.")
+    admins = await get_admins()
+    if message.from_user.id in admins:
+        await message.answer(f"Привет, Админ! Твой ID: `{message.from_user.id}`\n\n"
+                             "Жду сообщений от пользователей.")
     else:
-        await message.answer("Привет! Напиши мне, я передам администратору.")
-
-# --- УПРАВЛЕНИЕ АДМИНАМИ ---
+        await message.answer(f"Привет! Это бот обратной связи. Твой ID: `{message.from_user.id}`")
 
 @dp.message(Command("add"))
 async def add_admin(message: types.Message, command: CommandObject):
-    if message.from_user.id != OWNER_ID:
-        await message.answer("⛔ Только владелец может добавлять админов.")
-        return
-
+    if message.from_user.id != OWNER_ID: return
+    
     if not command.args:
-        await message.answer("Введите ID. Пример: `/add 12345`")
+        await message.answer("Пиши: /add 12345678")
         return
-
     try:
         new_id = int(command.args.strip())
-        admins = await get_admins()
-        
-        if new_id not in admins:
-            admins.add(new_id)
-            # Сохраняем обновленный список в облако
-            await save_admins_cloud(admins)
-            await message.answer(f"✅ Админ {new_id} сохранен в облако.")
-        else:
-            await message.answer("Он уже админ.")
-            
+        admins = await get_admins(message)
+        admins.add(new_id)
+        await save_admins_cloud(admins, message)
+        await message.answer(f"✅ Админ {new_id} добавлен.")
     except ValueError:
-        await message.answer("ID должен быть числом.")
+        await message.answer("Нужны только цифры.")
 
 @dp.message(Command("del"))
 async def del_admin(message: types.Message, command: CommandObject):
-    if message.from_user.id != OWNER_ID:
-        return
-
+    if message.from_user.id != OWNER_ID: return
     try:
         del_id = int(command.args.strip())
-        if del_id == OWNER_ID:
-            await message.answer("Себя удалить нельзя.")
-            return
-            
-        admins = await get_admins()
-        if del_id in admins:
+        admins = await get_admins(message)
+        if del_id in admins and del_id != OWNER_ID:
             admins.discard(del_id)
-            await save_admins_cloud(admins)
-            await message.answer(f"🗑 Админ {del_id} удален из облака.")
+            await save_admins_cloud(admins, message)
+            await message.answer(f"🗑 Удален.")
         else:
-            await message.answer("Такого ID нет.")
-    except:
-        await message.answer("Ошибка ввода ID.")
+            await message.answer("Нельзя удалить себя или такого админа нет.")
+    except: pass
 
 @dp.message(Command("list"))
 async def list_admins(message: types.Message):
-    if message.from_user.id != OWNER_ID:
-        return
-    
-    admins = await get_admins()
-    text = "Список (из облака):\n" + "\n".join([f"`{uid}`" for uid in admins])
-    await message.answer(text, parse_mode="Markdown")
+    if message.from_user.id != OWNER_ID: return
+    admins = await get_admins(message)
+    await message.answer(f"Список админов: {list(admins)}")
 
-# --- ПЕРЕСЫЛКА ---
+# --- ЛОГИКА ПЕРЕСЫЛКИ ---
 
-# Админ отвечает
 @dp.message(F.reply_to_message)
-async def admin_reply(message: types.Message):
+async def admin_reply_handler(message: types.Message):
     admins = await get_admins()
+    # Если пишет не админ — считаем это обычным сообщением
     if message.from_user.id not in admins:
         await forward_to_admins(message, admins)
         return
 
+    # Это ответ админа пользователю
     origin = message.reply_to_message.forward_origin
     if origin and isinstance(origin, MessageOriginUser):
         try:
             await message.copy_to(chat_id=origin.sender_user.id)
             await message.react([types.ReactionTypeEmoji(emoji="👍")])
         except Exception as e:
-            await message.answer(f"Не удалось доставить: {e}")
+            await message.answer(f"Не удалось отправить: {e}")
     else:
-        await message.answer("Не вижу ID пользователя.")
+        await message.answer("Не могу найти пользователя (профиль скрыт).")
 
-# Пользователь пишет
 @dp.message()
-async def forward_handler(message: types.Message):
-    # Чтобы не вызывать get_admins каждый раз, можно кешировать, 
-    # но для надежности здесь вызываем всегда
+async def user_message_handler(message: types.Message):
     admins = await get_admins()
-    if message.from_user.id in admins:
-        return
+    # Админы не спамят сами себе (если это не реплай)
+    if message.from_user.id in admins: return
+    
     await forward_to_admins(message, admins)
 
-async def forward_to_admins(message: types.Message, admins):
-    for admin_id in admins:
-        try:
-            await message.forward(chat_id=admin_id)
-        except:
-            pass
+async def forward_to_admins(message, admins):
+    for aid in admins:
+        try: await message.forward(chat_id=aid)
+        except: pass
 
 # --- SERVER ---
-async def handle(request):
-    return web.Response(text="Bot with Cloud Storage is running")
-
-async def start_web_server():
+async def handle(request): return web.Response(text="Bot is running")
+async def start_web():
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
+    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080))).start()
 
 async def main():
-    await asyncio.gather(start_web_server(), dp.start_polling(bot))
+    await asyncio.gather(start_web(), dp.start_polling(bot))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass

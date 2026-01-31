@@ -8,7 +8,7 @@ from threading import Thread
 # --- КОНФИГУРАЦИЯ ---
 # Токен можно оставить здесь или (лучше) задать в настройках сервера как переменную окружения
 API_TOKEN = os.getenv('BOT_TOKEN', 'ВСТАВЬТЕ_ВАШ_ТОКЕН_ПРЯМО_СЮДА_ЕСЛИ_ТЕСТИРУЕТЕ_ЛОКАЛЬНО')
-ADMIN_ID = 1628455065  # Ваш ID
+ADMIN_ID = int(os.getenv('ADMIN_ID'))
 
 # Инициализация
 logging.basicConfig(level=logging.INFO)
